@@ -1,0 +1,330 @@
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## Project: C:/Users/Corey/Documents/Statistics/PhD/Projects/optim-rar-gs
+##
+## Purpose of script: Pooled fixed optimal ratio
+##
+## Author: Corey Voller
+##
+## Date Created: 
+##
+## QC'd by:
+## QC date:
+##
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## Notes:
+##   
+##
+## ─────────────────────────────────────────────────────────────────────────────
+##
+##
+message("Simulate Pooled Fixed Optimal Ratio With No Early Stopping Loss")
+# Number of fixed ratios to create
+m_grid <- 30L
+# Chunk size for progress bar
+chunk_size <- 100000L
+
+make_ratio_grid_from_prior <- function(m, theta_0, theta_tau0, a, delta,
+                                       p_lo = 0.005, p_hi = 0.995,
+                                       r_cap_lo = 0.05, r_cap_hi = 20) {
+  c <- log(a) / (2 * delta)
+  sd_theta <- sqrt(1 / theta_tau0)
+  
+  mu_logr <- c * theta_0
+  sd_logr <- abs(c) * sd_theta
+  
+  r_lo <- exp(mu_logr + sd_logr * qnorm(p_lo))
+  r_hi <- exp(mu_logr + sd_logr * qnorm(p_hi))
+  
+  r_lo <- max(r_lo, r_cap_lo)
+  r_hi <- min(r_hi, r_cap_hi)
+  
+  exp(seq(log(r_lo), log(r_hi), length.out = m))
+}
+
+
+simulate_BRAR_pl_fixedratio_final_loss <- function(
+    K, theta, sigma, I_theta_fix, delta, theta_0, theta_tau_0, ratio_fixed
+) {
+  theta_true <- rnorm(1, mean = theta_0, sd = sqrt(1 / theta_tau_0))
+  mu_2 <- 0
+  x_1 <- x_2 <- numeric(K)
+  muhat_1 <- muhat_2 <- numeric(K)
+  theta_hat <- numeric(K)
+  
+  I1 <- I2 <- Ip <- numeric(K)
+  n1 <- n2 <- n1.new <- n2.new <- numeric(K)
+  
+  theta_hat_tau <- theta_hat_n <- numeric(K)
+  
+  # Expected loss at each stage
+  loss_stage_post <- loss_stage_real <- numeric(K)
+  stop_k <- NA_integer_
+  
+  I_max <- I_theta_fix * inflation_factor
+  w_exp <- log(a) / delta
+  
+  for (k in 1:K) {
+    n1[k] <- (k / K) * (sigma^2) * I_theta_fix * (1 + ratio_fixed)
+    n2[k] <- (k / K) * (sigma^2) * I_theta_fix * (1 + (1 / ratio_fixed))
+    
+    if (k == 1) {
+      n1.new[k] <- n1[k]
+      n2.new[k] <- n2[k]
+    } else {
+      n1.new[k] <- n1[k] - n1[k - 1]
+      n2.new[k] <- n2[k] - n2[k - 1]
+    }
+    
+    # safety checks (should almost never trigger for fixed ratio)
+    if (k > 1 && n1.new[k] <= 0) {
+      n1[k] <- n1[k - 1] + 1e-5
+      n1.new[k] <- n1[k] - n1[k - 1]
+      n2[k] <- (k * n1[k] * sigma^2 * I_theta_fix) / (K * n1[k] - k * sigma^2 * I_theta_fix)
+      n2.new[k] <- n2[k] - n2[k - 1]
+    }
+    if (k > 1 && n2.new[k] <= 0) {
+      n2[k] <- n2[k - 1] + 1e-5
+      n2.new[k] <- n2[k] - n2[k - 1]
+      n1[k] <- (k * n2[k] * sigma^2 * I_theta_fix) / (K * n2[k] - k * sigma^2 * I_theta_fix)
+      n1.new[k] <- n1[k] - n1[k - 1]
+    }
+    
+    x_1[k] <- rnorm(1, mean = theta_true, sd = sqrt(sigma^2 / n1.new[k]))
+    x_2[k] <- rnorm(1, mean = 0,     sd = sqrt(sigma^2 / n2.new[k]))
+    
+    muhat_1[k] <- sum(n1.new[1:k] * x_1[1:k]) / sum(n1.new[1:k])
+    muhat_2[k] <- sum(n2.new[1:k] * x_2[1:k]) / sum(n2.new[1:k])
+    
+    I1[k] <- n1[k] / sigma^2
+    I2[k] <- n2[k] / sigma^2
+    Ip[k] <- 1 / (1 / I1[k] + 1 / I2[k])
+    
+    theta_hat[k] <- muhat_1[k] - muhat_2[k]
+    
+    theta_hat_tau[k] <- theta_tau_0 + Ip[k]
+    if (theta_hat_tau[k] <= 0) stop("Error: Tau must be positive")
+    
+    theta_hat_n[k] <- (theta_tau_0 * theta_0 + theta_hat[k] * Ip[k]) / theta_hat_tau[k]
+    
+    mu_post <- theta_hat_n[k]
+    posterior_var <- 1 / theta_hat_tau[k]
+    sigma_post <- sqrt(posterior_var)
+    
+    p_pos <- pnorm(mu_post / sigma_post)
+    p_neg <- 1 - p_pos
+    
+    C2_pos <- exp(w_exp * mu_post + 0.5 * w_exp^2 * posterior_var) *
+      pnorm((mu_post + w_exp * posterior_var) / sigma_post)
+    
+    C1_neg <- exp(-w_exp * mu_post + 0.5 * w_exp^2 * posterior_var) *
+      pnorm((w_exp * posterior_var - mu_post) / sigma_post)
+    
+    loss_stage_post[k] <- I1[k] * p_pos + I2[k] * p_neg + I2[k] * C2_pos + I1[k] * C1_neg
+    loss_stage_real[k] <- loss_function(theta = theta_true, I1 = I1[k], I2 = I2[k], a = a, delta = delta)
+  }
+  
+  if (is.na(stop_k)) stop_k <- K
+  c(final_post_loss = loss_stage_post[stop_k],
+    final_realised_loss = loss_stage_real[stop_k])
+}
+
+eval_grid_one_prior_bestloss_mcse_both_prior <- function(
+    cl,
+    prior_row,
+    ratio_grid,
+    nsims,
+    chunk_size,
+    K,
+    sigma,
+    I_theta_fix,
+    delta,
+    pb_env,
+    z_index
+) {
+  theta_0 <- prior_row[["theta_0"]]
+  theta_tau_0 <- prior_row[["theta_tau0"]]
+  
+  R <- length(ratio_grid)
+  n_chunks <- ceiling(nsims / chunk_size)
+  
+  best_post <- Inf
+  best_mcse_post <- NA_real_
+  best_real <- Inf
+  best_mcse_real <- NA_real_
+  best_ratio <- NA_real_
+  
+  for (rr in 1:R) {
+    ratio_fixed <- ratio_grid[rr]
+    
+    S_post <- 0.0; Q_post <- 0.0
+    S_real <- 0.0; Q_real <- 0.0
+    n_tot <- 0L
+    
+    for (c in 1:n_chunks) {
+      offset <- (c - 1L) * chunk_size
+      n_this <- min(chunk_size, nsims - offset)
+      
+      losses_list <- parLapply(
+        cl, 1:n_this,
+        function(i, z_index, rr, offset,
+                 theta_0, theta_tau_0,
+                 K, sigma, I_theta_fix, delta, ratio_fixed) {
+          
+          # include rr in the seed so different ratios don't reuse the same stream
+          set.seed(seed_ij(i, z_index, offset + 1000000L * rr))
+          
+          simulate_BRAR_pl_fixedratio_final_loss(
+            K = K,
+            sigma = sigma,
+            I_theta_fix = I_theta_fix,
+            delta = delta,
+            theta_0 = theta_0,
+            theta_tau_0 = theta_tau_0,
+            ratio_fixed = ratio_fixed
+          )
+        },
+        z_index = z_index,
+        rr = rr,
+        offset = offset,
+        theta_0 = theta_0,
+        theta_tau_0 = theta_tau_0,
+        N = N, K = K, sigma = sigma,
+        I_theta_fix = I_theta_fix, delta = delta,
+        ratio_fixed = ratio_fixed
+      )
+      
+      losses_mat <- do.call(rbind, losses_list)
+      post <- losses_mat[, "final_post_loss"]
+      real <- losses_mat[, "final_realised_loss"]
+      
+      S_post <- S_post + sum(post); Q_post <- Q_post + sum(post * post)
+      S_real <- S_real + sum(real); Q_real <- Q_real + sum(real * real)
+      n_tot  <- n_tot + length(post)
+      
+      pb_env$step <- pb_env$step + 1L
+      setTxtProgressBar(pb_env$pb, pb_env$step)
+    }
+    
+    mean_post <- S_post / n_tot
+    mean_real <- S_real / n_tot
+    
+    if (n_tot > 1L) {
+      s2_post <- (Q_post - (S_post * S_post) / n_tot) / (n_tot - 1L)
+      s2_real <- (Q_real - (S_real * S_real) / n_tot) / (n_tot - 1L)
+      mcse_post <- sqrt(s2_post / n_tot)
+      mcse_real <- sqrt(s2_real / n_tot)
+    } else {
+      mcse_post <- NA_real_
+      mcse_real <- NA_real_
+    }
+    
+    # choose best ratio
+    if (mean_real < best_real) {
+      best_post <- mean_post
+      best_mcse_post <- mcse_post
+      best_real <- mean_real
+      best_mcse_real <- mcse_real
+      best_ratio <- ratio_fixed
+    }
+  }
+  
+  list(
+    best_ratio = best_ratio,
+    best_post_loss = best_post,
+    best_mcse_post = best_mcse_post,
+    best_real_loss = best_real,
+    best_mcse_real = best_mcse_real
+  )
+}
+
+num_cores <- max(1, detectCores() - 1)
+cl <- makeCluster(num_cores)
+
+clusterExport(
+  cl,
+  varlist = c(
+    "seed_ij", "BASE_SEED", "STRIDE",
+    "make_ratio_grid_from_prior",
+    "loss_function",
+    "eval_grid_one_prior_bestloss_mcse_both_prior",
+    "simulate_BRAR_pl_fixedratio_final_loss",
+    "theta", "priors",
+    "I_theta_fix", "delta",
+    "a", "inflation_factor", "a_crit", "b_crit"
+  ),
+  envir = environment()
+)
+
+Z <- nrow(priors)
+
+# precompute ratio grids so we can build ONE progress bar
+ratio_grids <- vector("list", Z)
+for (z in 1:Z) {
+  pr <- priors[z, ]
+  ratio_grids[[z]] <- make_ratio_grid_from_prior(
+    m = m_grid,
+    theta_0 = pr$theta_0,
+    theta_tau0 = pr$theta_tau0,
+    a = a,
+    delta = delta
+  )
+}
+
+n_chunks <- ceiling(nsims / chunk_size)
+total_steps <- sum(vapply(ratio_grids, length, integer(1))) * n_chunks
+
+pb_env <- new.env(parent = emptyenv())
+pb_env$pb <- txtProgressBar(min = 0, max = total_steps, style = 3)
+pb_env$step <- 0L
+
+start.time <- Sys.time()
+
+best_ratio_by_prior <- numeric(Z)
+best_post_by_prior  <- numeric(Z)
+best_mcse_post_by_prior <- numeric(Z)
+best_real_by_prior  <- numeric(Z)
+best_mcse_real_by_prior <- numeric(Z)
+
+for (z in 1:Z) {
+  res_z <- eval_grid_one_prior_bestloss_mcse_both_prior(
+    cl = cl,
+    prior_row = priors[z, ],
+    ratio_grid = ratio_grids[[z]],
+    nsims = nsims,
+    chunk_size = chunk_size,
+    K = K,
+    sigma = sigma,
+    I_theta_fix = I_theta_fix,
+    delta = delta,
+    pb_env = pb_env,
+    z_index = z
+  )
+  
+  best_ratio_by_prior[z] <- res_z$best_ratio
+  best_post_by_prior[z]  <- res_z$best_post_loss
+  best_mcse_post_by_prior[z] <- res_z$best_mcse_post
+  best_real_by_prior[z]  <- res_z$best_real_loss
+  best_mcse_real_by_prior[z] <- res_z$best_mcse_real
+}
+
+close(pb_env$pb)
+end.time <- Sys.time()
+
+stopCluster(cl)
+
+print(end.time - start.time)
+
+fixedoptimalrations <- data.frame(
+  prior = 1:Z,
+  theta_0 = priors$theta_0,
+  theta_tau0 = priors$theta_tau0,
+  best_ratio = best_ratio_by_prior,
+  est_post = best_post_by_prior,
+  mcse_post = best_mcse_post_by_prior,
+  est_real = best_real_by_prior,
+  mcse_real = best_mcse_real_by_prior
+)
+print(fixedoptimalrations)
+# saveRDS(fixedoptimalrations, file = file.path("output/expected_losses", "fixedoptimalrations.rds"))

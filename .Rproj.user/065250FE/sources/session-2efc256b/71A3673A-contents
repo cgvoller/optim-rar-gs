@@ -1,0 +1,474 @@
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## Project: C:/Users/Corey/Documents/Statistics/PhD/Projects/optim-rar-gs
+##
+## Purpose of script: Table 3: with early stopping (freq pooled+group)
+##
+## Author: Corey Voller
+##
+## Date Created: 25-02-2025
+##
+## QC'd by:
+## QC date:
+##
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## Notes:
+##   
+##
+## ─────────────────────────────────────────────────────────────────────────────
+##
+## 
+# Simulate RAR Pooled ----------------------------------------------------------
+message("Simulate RAR Pooled - With early stopping")
+simulate_RAR_pl_early <- function(K, mu_1, mu_2, sigma, I_theta_fix,delta) {
+  # Estimates of mu, theta and ratio
+  muhat_1 <- muhat_2 <- theta_hat <- ratio <- numeric(K)
+  # data from trial
+  x_1 <- x_2 <- numeric(K)
+  # Information
+  I1 <- I2 <- Ip <- numeric(K)
+  # Total and new patients per arm at analysis K
+  n1 <- n2 <- n1.new <- n2.new <- numeric(K)
+  # Early stopping vars
+  z <- reject <- numeric(K)
+  # Inflation factor for GSD
+  I_max <- I_theta_fix * inflation_factor
+  for (k in 1:K) {
+    if (k == 1) {
+      # Initial equal allocation
+      ratio[k] <- 1
+      # Enroll 20 patients when N = 100, K=5
+      n1.new[k] <- n2.new[k] <- (k / K) * 2 * I_max
+      n1[k] <- n2[k] <- (k / K) * 2 * I_max
+    } else {
+      # Define ratio based on formula with previous estimate of theta
+      ratio[k] <-  a ** (theta_hat[k - 1] / (2 * delta))
+      # Patients in N1
+      n1[k] <- (k / K) * (sigma ^ 2) * I_max * (1 + ratio[k])
+      # Patient in N2
+      n2[k] <- (k / K) * (sigma ^ 2) * I_max *(1 + (1 / ratio[k]))
+      # Difference in patients from previous
+      n1.new[k] <- n1[k] - n1[k - 1]
+      n2.new[k] <- n2[k] - n2[k - 1]
+      if(n1.new[k]<=0){
+        n1[k]= n1[k - 1]+0.00001
+        n1.new[k] = n1[k] - n1[k - 1]
+        n2[k] = (k*n1[k]*sigma^2*I_max)/(5*n1[k]-k*sigma^2*I_max)
+        n2.new[k] = n2[k]-n2[k-1]
+      }
+      if(n2.new[k]<=0){
+        n2[k]= n2[k - 1]+0.00001
+        n2.new[k] = n2[k] - n2[k - 1]
+        n1[k] = (k*n2[k]*sigma^2*I_max)/(5*n2[k]-k*sigma^2*I_max)
+        n1.new[k] = n1[k]-n1[k-1]
+      }
+    }
+    # Sample once from normal distribution
+    x_1[k] <- rnorm(1, mu_1, sqrt(sigma^2/n1.new[k]))
+    x_2[k] <- rnorm(1, mu_2, sqrt(sigma^2/n2.new[k]))
+    # Calculate treatment effect estimate
+    muhat_1[k] <- sum(n1.new[1:k] * x_1[1:k]) / sum(n1.new)
+    muhat_2[k] <- sum(n2.new[1:k] * x_2[1:k]) / sum(n2.new)
+    theta_hat[k] <- muhat_1[k] - muhat_2[k]
+    # Calculate information
+    I1[k] <- n1[k] / sigma^2
+    I2[k] <- n2[k] / sigma^2
+    Ip[k] <- 1 / (1 / I1[k] + 1 / I2[k])
+    
+    z[k] <- (theta_hat[k]) * sqrt(Ip[k])
+    if (z[k] < a_crit[k]) {
+      reject[k] <- -1
+      break
+    } else if (z[k] > b_crit[k]) {
+      reject[k] <- 1
+      break
+    } else {
+      reject[k] <- 0
+    }
+  }
+  return(list(
+    n1 = n1,
+    n2 = n2,
+    theta_hat = theta_hat,
+    z = z,
+    reject = reject,
+    ratio = ratio
+  ))
+}
+
+# Initialise arrays
+fptb3_results <- initialise_arrays(
+  names3D =  c("theta_hats","z","rejecttb3","ratio"),
+  names2D = c("fptb3_EN1", "fptb3_EN2"),
+  nsims = JenNsims,
+  theta = theta,
+  Ks=rep(K,4)
+)
+
+# ---------- Setup cluster ----------
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+clusterSetRNGStream(cl, iseed = 42)
+clusterExport(
+  cl,
+  varlist = c(
+    "simulate_RAR_pl_early",
+    "I_theta_fix",
+    "delta",
+    "theta",
+    "JenNsims",
+    "a",
+    "K",
+    "inflation_factor",
+    "a_crit",
+    "b_crit"
+  )
+)
+
+# ---------- Progress bar setup ----------
+total_steps <- length(theta) * JenNsims
+pb <- txtProgressBar(min = 0, max = total_steps, style = 3)
+progress_count <- 0
+update_progress <- function(n = 1) {
+  progress_count <<- progress_count + n
+  setTxtProgressBar(pb, progress_count)
+}
+
+# Start timer
+start.time <- Sys.time()
+# For each theta, loop through RAR simulation JenNsims times
+for (j in 1:length(theta)) {
+  clusterExport(cl,varlist=c("j"))
+  simresults <- parLapply(cl, 1:JenNsims, \(x) {
+    # After each run of theta, print as progress
+    if (x %% JenNsims == 00)
+      print(x)
+    simulate_RAR_pl_early(
+      K = K,
+      mu_1 = theta[j],
+      mu_2 = 0,
+      sigma = 1,
+      I_theta_fix = I_theta_fix,
+      delta=delta
+    )
+  })
+  update_progress(JenNsims)
+    for (i in 1:JenNsims) {
+    fptb3_results$fptb3_EN1[i,j] = unlist(simresults[[i]]$n1[max(which(simresults[[i]]$n1!=0))])
+    fptb3_results$fptb3_EN2[i,j] = unlist(simresults[[i]]$n2[max(which(simresults[[i]]$n2!=0))])
+    fptb3_results$theta_hats[i,,j] <- unlist(simresults[[i]]$theta_hat)
+    fptb3_results$z[i,,j] <- unlist(simresults[[i]]$z)
+    fptb3_results$ratio[i,,j] <- unlist(simresults[[i]]$ratio)
+    fptb3_results$rejecttb3[i,,j] <- unlist(simresults[[i]]$reject)
+  }
+}
+stopCluster(cl)
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+# Calculate pooled expected sample sizes
+EN1_pool_se =  apply(fptb3_results$fptb3_EN1, 2, \(x) se_funct2(x))
+EN2_pool_se = apply(fptb3_results$fptb3_EN2, 2, \(x) se_funct2(x))
+total_pool = round2(EN1_pool_se["mean", ] + EN2_pool_se["mean", ],digit=dig)
+EN1_pool = apply(EN1_pool_se, 2, \(x) tidy_se(x, digit = dig))
+EN2_pool = apply(EN2_pool_se, 2, \(x) tidy_se(x, digit = dig))
+
+# Simulate RAR Grouped ---------------------------------------------------------
+message("Simulate RAR Grouped - With early stopping")
+
+simulate_RAR_group_early <- function(K, mu_1, mu_2, sigma, I_theta_fix,delta) {
+  # Estimates of mu, theta and ratio
+  muhat_1 <- muhat_2 <- theta_hat <- theta_hat_group <- ratio <- numeric(K)
+  # Data from trial
+  x_1 <- x_2 <- numeric(K)
+  # Information
+  I1 <- I2 <- Ip <- numeric(K)
+  # Total patients per arm
+  n1 <- n2 <- rep(0,K)
+  # Early stopping vars
+  z <- reject <- numeric(K)
+  # Inflation factor for GSD
+  I_max <- I_theta_fix * inflation_factor
+  for (k in 1:K) {
+    if (k == 1) {
+      ratio[k] <- 1
+      # Initial equal allocation
+      n1[k] <- n2[k] <- (k / K) * 2 * I_max
+    } else {
+      ratio[k] <-  a ** (theta_hat_group[k - 1] / (2 * delta))
+      n1[k] <- (1 / K) * (sigma ^ 2) * I_max * (1 + ratio[k])
+      n2[k] <- (1 / K) * (sigma ^ 2) * I_max * (1 + (1 / ratio[k]))
+    }
+    # Sample once from normal distribution
+    muhat_1[k] <- c(rnorm(1, mean = mu_1, sd = sqrt(sigma ^ 2 / n1[k])))
+    muhat_2[k] <- c(rnorm(1, mean = mu_2, sd = sqrt((sigma ^ 2 / n2[k]))))
+    
+    theta_hat[k] <- muhat_1[k] - muhat_2[k]
+    theta_hat_group[k] = (1 / k) * (sum(theta_hat[1:(k)]))
+    I1[k] <- n1[k] / sigma^2
+    I2[k] <- n2[k] / sigma^2
+    Ip[k] <- (1/I1[k]+1/I2[k])^(-1)
+    
+    z[k] <- (theta_hat_group[k]) * sqrt(sum(Ip[1:k]))
+    # Early stopping (futility and efficacy boundaries)
+    if (z[k] < a_crit[k]) {
+      reject[k] <- -1
+      break
+    } else if (z[k] > b_crit[k]) {
+      reject[k] <- 1
+      break
+    } else {
+      reject[k] <- 0
+    }
+  }
+  return(list(
+    n1 = n1,
+    n2 = n2,
+    theta_hat_group = theta_hat_group,
+    z = z,
+    reject = reject,
+    ratio = ratio
+  ))
+}
+
+# Initialise arrays
+fgtb3_results <- initialise_arrays(
+  names3D =  c("theta_group","z","rejecttb3","ratio"),
+  names2D = c("fgtb3_EN1", "fgtb3_EN2"),
+  nsims = nsims,
+  theta = theta,
+  Ks=rep(K,4)
+)
+
+# ---------- Setup cluster ----------
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+clusterSetRNGStream(cl, iseed = 42)
+clusterExport(
+  cl,
+  varlist = c(
+    "simulate_RAR_group_early",
+    "I_theta_fix",
+    "delta",
+    "theta",
+    "JenNsims",
+    "a",
+    "K",
+    "inflation_factor",
+    "a_crit",
+    "b_crit"
+  )
+)
+
+# ---------- Progress bar setup ----------
+total_steps <- length(theta) * JenNsims
+pb <- txtProgressBar(min = 0, max = total_steps, style = 3)
+progress_count <- 0
+update_progress <- function(n = 1) {
+  progress_count <<- progress_count + n
+  setTxtProgressBar(pb, progress_count)
+}
+
+# Start timer
+start.time <- Sys.time()
+
+for (j in 1:length(theta)) {
+  clusterExport(cl, varlist = c("j"))
+  simresults <- parLapply(cl,1:JenNsims, function(x) {
+    # After each run of theta, print as progress
+    if (x %% JenNsims == 00)
+      print(x)
+    simulate_RAR_group_early(
+      K = K,
+      mu_1 = theta[j],
+      mu_2 = 0,
+      sigma = 1,
+      I_theta_fix = I_theta_fix,
+      delta = delta
+    )
+  })
+  
+  for (i in 1:JenNsims) {
+    fgtb3_results$fgtb3_EN1[i,j] = unlist(sum(simresults[[i]]$n1))
+    fgtb3_results$fgtb3_EN2[i,j] = unlist(sum(simresults[[i]]$n2))
+    fgtb3_results$final_loss[i,j] = unlist(simresults[[i]]$final_loss)
+    fgtb3_results$theta_group[i,,j] = unlist(simresults[[i]]$theta_hat_group)
+    fgtb3_results$ratio[i,,j] = unlist(simresults[[i]]$ratio)
+    fgtb3_results$z[i,,j] = unlist(simresults[[i]]$z)
+    fgtb3_results$rejecttb3[i,,j] = unlist(simresults[[i]]$reject)
+  }
+}
+stopCluster(cl)
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+EN1_group_se =  apply(fgtb3_results$fgtb3_EN1, 2, \(x) se_funct2(x))
+EN2_group_se = apply(fgtb3_results$fgtb3_EN2, 2, \(x) se_funct2(x))
+total_group = round2(EN1_group_se["mean", ] + EN2_group_se["mean", ],digit=dig)
+EN1_group = apply(EN1_group_se, 2, \(x) tidy_se(x, digit = dig))
+EN2_group = apply(EN2_group_se, 2, \(x) tidy_se(x, digit = dig))
+
+
+# Non-adaptive -----------------------------------------------------------------
+message("Simulate Non-adaptive - With early stopping")
+
+simulate_NA_early <- function(K, mu_1, mu_2, sigma, I_theta_fix, delta) {
+  # Estimates of mu, theta and ratio
+  muhat_1 <- muhat_2 <- theta_hat <- ratio <- numeric(K)
+  # data from trial
+  x_1 <- x_2 <- numeric(0)
+  # Information
+  I1 <- I2 <- Ip <- numeric(K)
+  # Total and new patients per arm at analysis K
+  n1 <- n2 <- n1.new <- n2.new <- numeric(K)
+  # Early stopping vars
+  z <- reject <- numeric(K)
+  # Inflation factor for GSD
+  I_max <- I_theta_fix * inflation_factor
+  for (k in 1:K) {
+    ratio[k] <- 1
+    n1.new[k] <- n2.new[k] <- (1 / K) * 2 * I_max
+    n1[k] <- n2[k] <- (k / K) * 2 * I_max
+    x_1[k] <- rnorm(1, mean = mu_1, sd = sqrt(sigma^2 / n1.new[k]))
+    x_2[k] <- rnorm(1, mean = mu_2, sd =  sqrt(sigma^2 / n2.new[k]))
+    muhat_1[k] <- sum(n1.new[1:k] * x_1[1:k]) / sum(n1.new)
+    muhat_2[k] <- sum(n2.new[1:k] * x_2[1:k]) / sum(n2.new)
+    # Treatment effect, difference of two means
+    theta_hat[k] <- muhat_1[k] - muhat_2[k]
+    I1[k] <- n1[k] / sigma^2
+    I2[k] <- n2[k] / sigma^2
+    Ip[k] <- (1/I1[k]+1/I2[k])^(-1)
+    z[k] <- (theta_hat[k]) * sqrt(Ip[k])
+    # Early stopping (futility and efficacy boundaries)
+    if (z[k] < a_crit[k]) {
+      reject[k] <- -1
+      break
+    } else if (z[k] > b_crit[k]) {
+      reject[k] <- 1
+      break
+    } else {
+      reject[k] <- 0
+    }
+  }
+  return(list(
+    n1 = n1,
+    n2 = n2,
+    theta_hat = theta_hat,
+    z = z,
+    reject = reject,
+    ratio = ratio
+  ))
+}
+
+# Initialise arrays
+fttb3_results <- initialise_arrays(
+  names3D =  c("theta_hat","z","rejecttb3","ratio"),
+  names2D = c("fttb3_EN1", "fttb3_EN2"),
+  nsims = JenNsims,
+  theta = theta,
+  Ks=rep(K,4)
+)
+
+# ---------- Setup cluster ----------
+num_cores <- detectCores() - 1
+cl <- makeCluster(num_cores)
+clusterSetRNGStream(cl, iseed = 42)
+clusterExport(
+  cl,
+  varlist = c(
+    "simulate_NA_early",
+    "I_theta_fix",
+    "delta",
+    "theta",
+    "JenNsims",
+    "a",
+    "K",
+    "inflation_factor",
+    "a_crit",
+    "b_crit"
+  )
+)
+
+# ---------- Progress bar setup ----------
+total_steps <- length(theta) * JenNsims
+pb <- txtProgressBar(min = 0, max = total_steps, style = 3)
+progress_count <- 0
+update_progress <- function(n = 1) {
+  progress_count <<- progress_count + n
+  setTxtProgressBar(pb, progress_count)
+}
+
+# Start timer
+start.time <- Sys.time()
+# For each theta, loop through RAR simulation nsims times
+for (j in 1:length(theta)) {
+  clusterExport(cl, varlist = c("j"))
+  simresults <- parLapply(cl, 1:JenNsims, \(x) {
+    # After each run of theta, print as progress
+    if (x %% JenNsims == 00)
+      print(x)
+    simulate_NA_early(
+      K = K,
+      mu_1 = theta[j],
+      mu_2 = 0,
+      sigma = 1,
+      I_theta_fix = I_theta_fix,
+      delta=delta
+    )
+  })
+  update_progress(JenNsims)
+  for (i in 1:nsims) {
+    fttb3_results$fttb3_EN1[i,j] = unlist(simresults[[i]]$n1[max(which(simresults[[i]]$n1!=0))])
+    fttb3_results$fttb3_EN2[i,j] = unlist(simresults[[i]]$n2[max(which(simresults[[i]]$n2!=0))])
+    fttb3_results$z[i,,j] = unlist(simresults[[i]]$z)
+    fttb3_results$ratio[i,,j] = unlist(simresults[[i]]$ratio)
+    fttb3_results$rejecttb3[i,,j] = unlist(simresults[[i]]$reject)
+  }
+}
+stopCluster(cl)
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+
+# Calculate nadapted expected sample sizes
+EN1_nadapt_se =  apply(fttb3_results$fttb3_EN1, 2, \(x) se_funct2(x))
+EN2_nadapt_se = apply(fttb3_results$fttb3_EN2, 2, \(x) se_funct2(x))
+total_nadapt = round2(EN1_nadapt_se["mean", ] + EN2_nadapt_se["mean", ],digit=dig)
+EN1_nadapt = apply(EN1_nadapt_se, 2, \(x) tidy_se(x, digit = dig))
+EN2_nadapt = apply(EN2_nadapt_se, 2, \(x) tidy_se(x, digit = dig))
+
+# Output -----------------------------------------------------------------------
+
+# Table
+freq_tb3 <- create_tab_fun(EN1_nadapt,
+                           EN2_nadapt,
+                           total_nadapt,
+                           EN1_pool,
+                           EN2_pool,
+                           total_pool,
+                           EN1_group,
+                           EN2_group,
+                           total_group,
+                           headertxt = "Designs with early stopping",
+                           footnotetxt = paste("mean (standard error) to", dig, "decimal place"))
+freq_tb3
+# Remove objects ---------------------------------------------------------------
+
+rm(
+  EN1_nadapt,
+  EN2_nadapt,
+  total_nadapt,
+  EN1_pool,
+  EN2_pool,
+  total_pool,
+  EN1_pool_se,
+  EN2_pool_se,
+  EN1_group,
+  EN2_group,
+  total_group,
+  EN1_group_se,
+  EN2_group_se
+)
