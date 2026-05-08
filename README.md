@@ -16,6 +16,7 @@ Below is a file tree, showcasing the structure of this repository.
 │   └── stopping_heatmap.R
 ├── jennison_benchmarks/
 │   ├── 01_tab_no_early_stopping.R
+│   ├── 02_tab_no_early_stopping_delay.R
 │   ├── 03_tab_early_stopping.R
 │   └── ...
 └── prior_predictive_loss/
